@@ -107,12 +107,9 @@ Conan will always set CMAKE_OSX_ARCHITECTURES to a single arch, unless a toolcha
 
 One approach is here: <https://github.com/gmeeker/conan-darwin-toolchain> which is forked from <https://github.com/theodelrieu/conan-darwin-toolchain> and updated for multiple architectures.  Add the package to [build_requires].
 
-Set CONAN_CMAKE_GENERATOR=Xcode which the hook will detect and the toolchain will handle the rest.
-The toolchain will set CONAN_CMAKE_OSX_ARCHITECTURES from os.fat_arch.
-```
-```
+Set CONAN_CMAKE_GENERATOR=Xcode which the hook will detect and the toolchain will handle the rest.  The toolchain will set CONAN_CMAKE_OSX_ARCHITECTURES from os.fat_arch.
 
-Note that only the CMake generator uses CONAN_CMAKE_TOOLCHAIN_FILE and the CMake tool does not.  This might be a problem for Conan 2.0.
+Note that only the CMake generator uses CONAN_CMAKE_TOOLCHAIN_FILE and the CMake tool does not.  Ideally CMake support for multiple architectures should be addressed in the Conan source itself.
 
 ### Code signing
 
