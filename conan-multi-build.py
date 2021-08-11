@@ -232,15 +232,15 @@ def supports_multi_arch(conanfile):
     return True
 
 def patch_conanfile(conanfile):
-    if not supported_os(conanfile.settings.os):
-        # Unsupported OS
-        return
     try:
         if conanfile.options.header_only:
             # Header only
             return
     except ConanException:
         pass
+    if not supported_os(conanfile.settings.get_safe("os")):
+        # Unsupported OS
+        return
     try:
         conanfile.settings.arch
     except ConanException:
