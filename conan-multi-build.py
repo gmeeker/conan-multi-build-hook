@@ -13,6 +13,8 @@ from conans.model.conan_file import get_env_context_manager
 from conans.client.tools.apple import is_apple_os
 from conans.client.build.cmake_flags import get_generator
 
+required_conan_version = ">=1.37.0"
+
 # Can be overriden in settings / profile
 _multi_arch_generators = ['cmake']
 
@@ -86,16 +88,52 @@ def copy_arch_file(conanfile, src, dst, top=None, archs=[]):
         else:
             shutil.copy2(src, dst)
 
+# Modified copytree to copy new files to an existing tree.
+def graft_tree(src, dst, symlinks=False, copy_function=shutil.copy2, dirs_exist_ok=False):
+    names = os.listdir(src)
+    os.makedirs(dst, exist_ok=dirs_exist_ok)
+    errors = []
+    for name in names:
+        srcname = os.path.join(src, name)
+        dstname = os.path.join(dst, name)
+        if os.path.exists(dstname):
+            continue
+        try:
+            if symlinks and os.path.islink(srcname):
+                linkto = os.readlink(srcname)
+                os.symlink(linkto, dstname)
+            elif os.path.isdir(srcname):
+                graft_tree(srcname, dstname, symlinks, copy_function, dirs_exist_ok)
+            else:
+                copy_function(srcname, dstname)
+            # XXX What about devices, sockets etc.?
+        except OSError as why:
+            errors.append((srcname, dstname, str(why)))
+        # catch the Error from the recursive graft_tree so that we can
+        # continue with other files
+        except Error as err:
+            errors.extend(err.args[0])
+    try:
+        shutil.copystat(src, dst)
+    except OSError as why:
+        # can't copy file access times on Windows
+        if why.winerror is None:
+            errors.extend((src, dst, str(why)))
+    if errors:
+        raise shutil.Error(errors)
+
 def conanfile_copy(conanfile):
     result = copy.copy(conanfile)
     result._build1 = types.MethodType(result.__class__.build, result)
     result._package1 = types.MethodType(result.__class__.package, result)
+    result._test1 = types.MethodType(result.__class__.test, result)
     result.settings = conanfile.settings.copy()
-    result.options = conanfile.options.copy()
-    result.layout = copy.deepcopy(conanfile.layout)
+    # result.options = conanfile.options.copy()
+    # result.layout = copy.deepcopy(conanfile.layout)
+    result.folders = copy.deepcopy(conanfile.folders)
     # result.deps_cpp_info = copy.copy(result.deps_cpp_info)
-    result.deps_cpp_info = DepsCppInfo()
-    result.deps_cpp_info.update(conanfile.deps_cpp_info)
+    # result.deps_cpp_info = DepsCppInfo()
+    # result.deps_cpp_info.update(conanfile.deps_cpp_info)
     return result
 
 def cmake_system_name(conanfile):
@@ -187,6 +225,35 @@ def multi_build(self_):
     else:
         self_._build1()
 
+def multi_test(self_):
+    archs = get_archs(self_)
+    if len(archs) > 1:
+        settings = self_.settings
+        build_folder = self_.build_folder
+        package_folder = self_.package_folder
+        for arch in archs:
+            conanfile = conanfile_copy(self_)
+            conanfile.deps_cpp_info = self_.deps_cpp_info
+            conanfile.display_name = '%s[%s]' % (self_.display_name, arch)
+            conanfile.settings.arch = arch
+            conanfile.settings.os.fat_arch = None
+            conanfile.build_folder = os.path.join(build_folder, _arch_folder, arch)
+            conanfile.install_folder = conanfile.build_folder
+            conanfile.package_folder = os.path.join(package_folder, _arch_folder, arch)
+            with tools.chdir(conanfile.build_folder):
+                conanfile._test1()
+    else:
+        self_._test1()
+
+def safe_package(self_):
+    # Some packages (libpng) use cmake but package with self.copy("*")
+    # so make sure that we don't find the single arch files.
+    copy = self_.copy
+    def copy_(*args, excludes=[], **kw):
+        copy(*args, excludes=excludes + ["*Objects-normal"], **kw)
+    self_.copy = copy_
+    self_._package1()
+
 def multi_package(self_):
     archs = get_archs(self_)
     if len(archs) > 1:
@@ -195,6 +262,7 @@ def multi_package(self_):
         package_folder = self_.package_folder
         for arch in archs:
             conanfile = conanfile_copy(self_)
+            conanfile.display_name = '%s[%s]' % (self_.display_name, arch)
             conanfile.settings.arch = arch
             conanfile.settings.os.fat_arch = None
             conanfile.build_folder = os.path.join(build_folder, _arch_folder, arch)
@@ -207,19 +275,23 @@ def multi_package(self_):
                 conanfile.output.info(conanfile.settings)
                 conanfile._package1()
         for arch in archs:
-            shutil.copytree(os.path.join(package_folder, _arch_folder, arch),
-                            package_folder,
-                            symlinks=True,
-                            copy_function=lambda s, d: copy_arch_file(conanfile, s, d, top=package_folder, archs=archs),
-                            dirs_exist_ok=True)
+            graft_tree(os.path.join(package_folder, _arch_folder, arch),
+                       package_folder,
+                       symlinks=True,
+                       copy_function=lambda s, d: copy_arch_file(conanfile, s, d, top=package_folder, archs=archs),
+                       dirs_exist_ok=True)
         shutil.rmtree(os.path.join(self_.package_folder, _arch_folder))
     else:
         self_._package1()
 
 def supports_multi_arch(conanfile):
     try:
-        return conanfile.options.multi_arch
+        return conanfile.settings.multi_arch
     except ConanException:
+        pass
+    try:
+        return conanfile.multi_arch
+    except AttributeError:
         pass
     for generator in conanfile.generators:
         if generator in multi_arch_generators(conanfile):
@@ -250,11 +322,18 @@ def patch_conanfile(conanfile):
         return
     # if "cmake" in conanfile.generators and "cmake" in multi_arch_generators(conanfile):
     #     setup_cmake(conanfile)
+    if getattr(conanfile, "_package1", None):
+        # already patched
+        return
     if supports_multi_arch(conanfile):
+        conanfile._package1 = conanfile.package
+        conanfile.multi_package = types.MethodType(safe_package, conanfile)
+        conanfile.package = conanfile.multi_package
         return
     conanfile.output.info("Enable multi build for %s" % (conanfile.display_name))
     conanfile._build1 = conanfile.build
     conanfile._package1 = conanfile.package
+    conanfile._test1 = conanfile.test
     try:
         conanfile.build = conanfile.multi_build
     except AttributeError:
@@ -265,6 +344,11 @@ def patch_conanfile(conanfile):
     except AttributeError:
         conanfile.multi_package = types.MethodType(multi_package, conanfile)
         conanfile.package = conanfile.multi_package
+    try:
+        conanfile.test = conanfile.multi_test
+    except AttributeError:
+        conanfile.multi_test = types.MethodType(multi_test, conanfile)
+        conanfile.test = conanfile.multi_test
 
 def pre_build(output, conanfile, **kwargs):
     patch_conanfile(conanfile)

@@ -87,7 +87,7 @@ To add support without requiring a custom version of Conan, this pre_build and p
 * Header only recipe
 * arch is not a dependency
 * fat_arch is not defined or only arch is specified (note that this means you can't force a single architecture universal binary)
-* recipe has options.multi_arch=False
+* recipe has multi_arch=False
 * multi_build or multi_package is implemented (can be overriden independently)
 * recipe's generator should handle this (currently only 'cmake')
 
